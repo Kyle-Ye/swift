@@ -34,7 +34,7 @@
 // CHECK: <-(plugin:[[#PID]]) {"expandFreestandingMacroResult":{"diagnostics":[],"expandedSource":"\"123\"\n  +   \"foo  \""}}
 // CHECK: ->(plugin:[[#PID]]) {"expandFreestandingMacro":{"discriminator":"$s{{.+}}","lexicalContext":[{{.*}}],"macro":{"moduleName":"TestPlugin","name":"testStringWithError","typeName":"TestStringWithErrorMacro"},"macroRole":"expression","staticBuildConfiguration"{{.*}},"syntax":{"kind":"expression","location":{"column":19,"fileID":"MyApp/test.swift","fileName":"{{.+}}test.swift","line":6,"offset":336},"source":"#testStringWithError(321)"}}}
 // CHECK: <-(plugin:[[#PID]]) {"expandFreestandingMacroResult":{"diagnostics":[{"fixIts":[],"highlights":[],"message":"message from plugin","notes":[],"position":{"fileName":"{{.*}}test.swift","offset":336},"severity":"error"}],"expandedSource":"\"bar\""}}
-// CHECK: ->(plugin:[[#PID:]]) {{$}}
+// CHECK-NOT: Internal Error: dataCorrupted
 
 //--- test.swift
 @freestanding(expression) macro testString(_: Any) -> String = #externalMacro(module: "TestPlugin", type: "TestStringMacro")
@@ -48,8 +48,34 @@ func test() {
 
 //--- plugin.c
 #include "swift-c/MockPlugin/MockPlugin.h"
+#include <stdio.h>
 
-MOCK_PLUGIN([
+#if !defined(_WIN32)
+#include <signal.h>
+#endif
+
+// swift-syntax 602.0.0 tried to decode a zero-length termination frame as
+// JSON and printed an internal error. Simulate that behavior here so this test
+// covers compatibility with plugins built against that release.
+static int run_legacy_mock_plugin(const char *spec) {
+#if !defined(_WIN32)
+  // Let the mock consume the termination frame before the host tears it down.
+  signal(SIGTERM, SIG_IGN);
+#endif
+  int result = _mock_plugin_main(spec);
+  if (result != 0) {
+    fputs("Internal Error: dataCorrupted(Swift.DecodingError.Context("
+          "codingPath: [], debugDescription: \"Corrupted JSON\", "
+          "underlyingError: Optional(unexpected end of file)))\n",
+          stderr);
+  }
+  return result;
+}
+
+#define LEGACY_MOCK_PLUGIN(...)                                               \
+  int main(void) { return run_legacy_mock_plugin(#__VA_ARGS__); }
+
+LEGACY_MOCK_PLUGIN([
   {
     "expect": {"getCapability": {}},
     "response": {"getCapabilityResult": {"capability": {"protocolVersion": 1}}}
